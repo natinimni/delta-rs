@@ -8,7 +8,7 @@ use serde_json::json;
 
 use crate::protocol::{
     Action, Add, AddCDCFile, ColumnCountStat, ColumnValueStat, DeletionVector, MetaData, Protocol,
-    ProtocolError, Remove, Stats, Txn,
+    ProtocolError, Remove, Stats, Txn, serde_path::decode_path
 };
 
 use super::StorageType;
@@ -105,10 +105,13 @@ impl Add {
         for (i, (name, _)) in record.get_column_iter().enumerate() {
             match name.as_str() {
                 "path" => {
-                    re.path = record
-                        .get_string(i)
-                        .map_err(|_| gen_action_type_error("add", "path", "string"))?
-                        .clone();
+                    re.path = decode_path(
+                        record
+                            .get_string(i)
+                            .map_err(|_| gen_action_type_error("add", "path", "string"))?
+                            .clone()
+                            .as_str(),
+                    )?;
                 }
                 "size" => {
                     re.size = record
@@ -486,10 +489,13 @@ impl Remove {
         for (i, (name, _)) in record.get_column_iter().enumerate() {
             match name.as_str() {
                 "path" => {
-                    re.path = record
-                        .get_string(i)
-                        .map_err(|_| gen_action_type_error("remove", "path", "string"))?
-                        .clone();
+                    re.path = decode_path(
+                        record
+                            .get_string(i)
+                            .map_err(|_| gen_action_type_error("remove", "path", "string"))?
+                            .clone()
+                            .as_str(),
+                    )?;
                 }
                 "dataChange" => {
                     re.data_change = record
