@@ -100,17 +100,17 @@ impl PartitionFilter {
                             .map(|x| x.is_eq())
                             .unwrap_or(false)
                     },
-                    _ => value == &partition.value
-                }
+                    _ => {
+                        value == &partition.value
+                    }
             }
             PartitionValue::NotEqual(value) => {
-                match data_type {
-                    SchemaDataType::primitive(type_name) if type_name == "timestamp" => {
-                        compare_typed_value(&partition.value, value, data_type)
-                            .map(|x| !x.is_eq())
-                            .unwrap_or(false)
-                    },
-                    _ => value != &partition.value
+                if let SchemaDataType::primitive(type_name) = data_type && type_name == "timestamp" {
+                    compare_typed_value(&partition.value, value, data_type)
+                        .map(|x| !x.is_eq())
+                        .unwrap_or(false)
+                } else {
+                    value != &partition.value
                 }
             }
             PartitionValue::GreaterThan(value) => {
