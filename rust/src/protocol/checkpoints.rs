@@ -414,7 +414,9 @@ fn checkpoint_add_from_state(
     partition_col_data_types: &[(&str, &SchemaDataType)],
     stats_conversions: &[(SchemaPath, SchemaDataType)],
 ) -> Result<Value, ProtocolError> {
-    let mut v = serde_json::to_value(Action::add(add.clone()))
+    let mut clone_add = add.clone();
+    clone_add.stats = None;
+    let mut v = serde_json::to_value(Action::add(clone_add))
         .map_err(|err| ArrowError::JsonError(err.to_string()))?;
 
     v["add"]["dataChange"] = Value::Bool(false);
