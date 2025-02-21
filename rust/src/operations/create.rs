@@ -299,8 +299,11 @@ impl std::future::IntoFuture for CreateBuilder {
                     SaveMode::ErrorIfExists => return Err(CreateError::TableAlreadyExists.into()),
                     SaveMode::Append => return Err(CreateError::AppendNotAllowed.into()),
                     SaveMode::Ignore => {
-                        table.load().await?;
-                        return Ok(table);
+                        match table.load().await {
+                            Ok(_) => return Ok(table),
+                            Err(DeltaTableError::NotATable(_)) => &table.state,
+                            Err(err) => return Err(err),
+                        }
                     }
                     SaveMode::Overwrite => {
                         table.load().await?;
