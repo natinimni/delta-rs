@@ -309,6 +309,7 @@ fn parquet_bytes_from_state(
     state: &DeltaTableState,
 ) -> Result<(CheckPoint, bytes::Bytes), ProtocolError> {
     let current_metadata = state.current_metadata().ok_or(ProtocolError::NoMetaData)?;
+    let write_stats_as_struct = state.table_config().write_stats_as_struct();
 
     let partition_col_data_types = current_metadata.get_partition_col_data_types();
 
@@ -376,7 +377,7 @@ fn parquet_bytes_from_state(
     .map(|a| serde_json::to_value(a).map_err(ProtocolError::from))
     // adds
     .chain(state.files().iter().map(|f| {
-        checkpoint_add_from_state(f, partition_col_data_types.as_slice(), &stats_conversions)
+        checkpoint_add_from_state(f, partition_col_data_types.as_slice(), &stats_conversions, write_stats_as_struct)
     }));
 
     // Create the arrow schema that represents the Checkpoint parquet file.
@@ -413,13 +414,18 @@ fn checkpoint_add_from_state(
     add: &AddAction,
     partition_col_data_types: &[(&str, &SchemaDataType)],
     stats_conversions: &[(SchemaPath, SchemaDataType)],
+    write_stats_as_struct: bool,
 ) -> Result<Value, ProtocolError> {
     let mut v = serde_json::to_value(Action::add(add.clone()))
         .map_err(|err| ArrowError::JsonError(err.to_string()))?;
 
     v["add"]["dataChange"] = Value::Bool(false);
 
-    if !add.partition_values.is_empty() {
+    if !write_stats_as_struct {
+        return Ok(v);
+    }
+
+    if !add.partition_values.is_empty() && write_stats_as_struct {
         let mut partition_values_parsed: HashMap<String, Value> = HashMap::new();
 
         for (field_name, data_type) in partition_col_data_types.iter() {

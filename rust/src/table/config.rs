@@ -201,7 +201,7 @@ impl<'a> TableConfig<'a> {
             DeltaConfigKey::CheckpointWriteStatsAsStruct,
             write_stats_as_struct,
             bool,
-            true
+            false
         ),
         (
             DeltaConfigKey::TargetFileSize,
