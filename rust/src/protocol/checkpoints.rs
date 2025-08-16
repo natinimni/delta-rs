@@ -385,6 +385,7 @@ fn parquet_bytes_from_state(
         <ArrowSchema as TryFrom<&Schema>>::try_from(&current_metadata.schema)?,
         current_metadata.partition_columns.as_slice(),
         use_extended_remove_schema,
+        write_stats_as_struct,
     );
 
     debug!("Writing to checkpoint parquet buffer...");
@@ -425,7 +426,7 @@ fn checkpoint_add_from_state(
         return Ok(v);
     }
 
-    if !add.partition_values.is_empty() && write_stats_as_struct {
+    if !add.partition_values.is_empty() {
         let mut partition_values_parsed: HashMap<String, Value> = HashMap::new();
 
         for (field_name, data_type) in partition_col_data_types.iter() {

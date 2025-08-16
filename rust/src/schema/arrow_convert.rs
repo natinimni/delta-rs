@@ -460,10 +460,12 @@ macro_rules! arrow_defs {
 /// * `partition_columns` - The list of partition columns of the table.
 /// * `use_extended_remove_schema` - Whether to include extended file metadata in remove action schema.
 ///    Required for compatibility with different versions of Databricks runtime.
+/// * `stats_as_struct` - Whether to include 'stats_parsed' and 'partitionValues_parsed' file metadata in add action schema.
 pub(crate) fn delta_log_schema_for_table(
     table_schema: ArrowSchema,
     partition_columns: &[String],
     use_extended_remove_schema: bool,
+    stats_as_struct: bool,
 ) -> ArrowSchemaRef {
     lazy_static! {
         static ref SCHEMA_FIELDS: Vec<ArrowField> = arrow_defs![
@@ -549,17 +551,19 @@ pub(crate) fn delta_log_schema_for_table(
         stats_parsed_fields.push(null_count_struct);
     }
     let mut add_fields = ADD_FIELDS.clone();
-    add_fields.push(ArrowField::new(
-        "stats_parsed",
-        ArrowDataType::Struct(stats_parsed_fields.into()),
-        true,
-    ));
-    if !partition_fields.is_empty() {
+    if stats_as_struct {
         add_fields.push(ArrowField::new(
-            "partitionValues_parsed",
-            ArrowDataType::Struct(partition_fields.into()),
+            "stats_parsed",
+            ArrowDataType::Struct(stats_parsed_fields.into()),
             true,
         ));
+        if !partition_fields.is_empty() {
+            add_fields.push(ArrowField::new(
+                "partitionValues_parsed",
+                ArrowDataType::Struct(partition_fields.into()),
+                true,
+            ));
+        }
     }
 
     // create remove fields with or without extendedFileMetadata
@@ -656,7 +660,7 @@ mod tests {
         ]);
         let partition_columns = vec!["pcol".to_string()];
         let log_schema =
-            delta_log_schema_for_table(table_schema.clone(), partition_columns.as_slice(), false);
+            delta_log_schema_for_table(table_schema.clone(), partition_columns.as_slice(), false, true);
 
         // verify top-level schema contains all expected fields and they are named correctly.
         let expected_fields = ["metaData", "protocol", "txn", "remove", "add"];
@@ -758,7 +762,7 @@ mod tests {
 
         // verify extended remove schema fields **ARE** included when `use_extended_remove_schema` is true.
         let log_schema =
-            delta_log_schema_for_table(table_schema, partition_columns.as_slice(), true);
+            delta_log_schema_for_table(table_schema, partition_columns.as_slice(), true, true);
         let remove_fields: Vec<_> = log_schema
             .fields()
             .iter()
