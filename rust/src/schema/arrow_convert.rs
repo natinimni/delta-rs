@@ -493,7 +493,7 @@ pub(crate) fn delta_log_schema_for_table(
             size:Int64,
             modificationTime:Int64,
             dataChange:Boolean,
-            stats:Utf8,
+            stats:LargeUtf8,
             partitionValues,
             tags,
             deletionVector[
