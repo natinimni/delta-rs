@@ -671,30 +671,23 @@ mod tests {
         }
         assert_eq!(5, log_schema.fields().len());
 
-        // verify protocol fields include the table features lists.
-        let protocol_field_names: Vec<String> = log_schema
-            .fields()
-            .iter()
-            .filter(|f| f.name() == "protocol")
-            .flat_map(|f| {
-                if let ArrowDataType::Struct(fields) = f.data_type() {
-                    fields
-                        .iter()
-                        .map(|f| f.name().to_owned())
-                        .collect::<Vec<_>>()
-                } else {
-                    unreachable!();
-                }
-            })
-            .collect();
+        // verify the protocol struct includes the table features lists.
+        let feature_list = ArrowDataType::List(Arc::new(ArrowField::new(
+            "element",
+            ArrowDataType::Utf8,
+            true,
+        )));
         assert_eq!(
-            vec![
-                "minReaderVersion",
-                "minWriterVersion",
-                "readerFeatures",
-                "writerFeatures"
-            ],
-            protocol_field_names
+            log_schema.field_with_name("protocol").unwrap().data_type(),
+            &ArrowDataType::Struct(
+                vec![
+                    ArrowField::new("minReaderVersion", ArrowDataType::Int32, true),
+                    ArrowField::new("minWriterVersion", ArrowDataType::Int32, true),
+                    ArrowField::new("readerFeatures", feature_list.clone(), true),
+                    ArrowField::new("writerFeatures", feature_list, true),
+                ]
+                .into()
+            )
         );
 
         // verify add fields match as expected. a lot of transformation goes into these.
