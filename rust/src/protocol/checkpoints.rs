@@ -339,11 +339,21 @@ fn parquet_bytes_from_state(
     }
 
     // protocol
+    // Table features must be written exactly when the protocol versions support them (reader v3 / writer v7).
+    // Dropping them leaves readers that start from this checkpoint with an invalid protocol.
     let jsons = std::iter::once(Action::protocol(Protocol {
         min_reader_version: state.min_reader_version(),
         min_writer_version: state.min_writer_version(),
-        writer_features: None,
-        reader_features: None,
+        writer_features: if state.min_writer_version() >= 7 {
+            state.writer_features().cloned()
+        } else {
+            None
+        },
+        reader_features: if state.min_reader_version() >= 3 {
+            state.reader_features().cloned()
+        } else {
+            None
+        },
     }))
     // metaData
     .chain(std::iter::once(Action::metaData(MetaData::try_from(
@@ -599,10 +609,77 @@ mod tests {
     use super::*;
     use lazy_static::lazy_static;
     use serde_json::json;
+    use std::collections::HashSet;
 
     use crate::operations::DeltaOps;
+    use crate::protocol::{ReaderFeatures, WriterFeatures};
+    use crate::table::builder::DeltaTableConfig;
+    use crate::table::DeltaTableMetaData;
     use crate::writer::test_utils::get_delta_schema;
     use object_store::path::Path;
+
+    fn state_with_protocol(protocol: Protocol) -> DeltaTableState {
+        let metadata =
+            DeltaTableMetaData::new(None, None, None, get_delta_schema(), vec![], HashMap::new());
+        DeltaTableState::from_actions(
+            vec![
+                Action::protocol(protocol),
+                Action::metaData(MetaData::try_from(metadata).unwrap()),
+            ],
+            0,
+        )
+        .unwrap()
+    }
+
+    fn checkpoint_round_trip(state: &DeltaTableState) -> DeltaTableState {
+        let (_, bytes) = parquet_bytes_from_state(state).unwrap();
+        let mut restored = DeltaTableState::with_version(0);
+        restored
+            .process_checkpoint_bytes(bytes, &DeltaTableConfig::default())
+            .unwrap();
+        restored
+    }
+
+    #[test]
+    fn test_checkpoint_preserves_table_features() {
+        let protocol = Protocol {
+            min_reader_version: 3,
+            min_writer_version: 7,
+            reader_features: Some(HashSet::from([ReaderFeatures::COLUMN_MAPPING])),
+            writer_features: Some(HashSet::from([
+                WriterFeatures::COLUMN_MAPPING,
+                WriterFeatures::APPEND_ONLY,
+            ])),
+        };
+
+        let restored = checkpoint_round_trip(&state_with_protocol(protocol.clone()));
+
+        assert_eq!(restored.min_reader_version(), 3);
+        assert_eq!(restored.min_writer_version(), 7);
+        assert_eq!(
+            restored.reader_features(),
+            protocol.reader_features.as_ref()
+        );
+        assert_eq!(
+            restored.writer_features(),
+            protocol.writer_features.as_ref()
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_omits_table_features_below_table_features_protocol() {
+        let restored = checkpoint_round_trip(&state_with_protocol(Protocol {
+            min_reader_version: 1,
+            min_writer_version: 2,
+            reader_features: Some(HashSet::new()),
+            writer_features: Some(HashSet::new()),
+        }));
+
+        assert_eq!(restored.min_reader_version(), 1);
+        assert_eq!(restored.min_writer_version(), 2);
+        assert_eq!(restored.reader_features(), None);
+        assert_eq!(restored.writer_features(), None);
+    }
 
     #[tokio::test]
     async fn test_create_checkpoint_for() {

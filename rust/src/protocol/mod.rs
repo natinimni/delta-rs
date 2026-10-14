@@ -656,19 +656,23 @@ pub struct Protocol {
 
 /// Features table readers can support as well as let users know
 /// what is supported
+///
+/// Variants serialize to the table feature names defined by the Delta protocol (e.g. `columnMapping`),
+/// which is what other readers expect. The SCREAMING_SNAKE_CASE aliases keep reading logs written by
+/// earlier versions of this crate, which serialized the variant identifiers instead.
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
 pub enum ReaderFeatures {
     /// Mapping of one column to another
-    #[serde(alias = "columnMapping")]
+    #[serde(rename = "columnMapping", alias = "COLUMN_MAPPING")]
     COLUMN_MAPPING,
     /// Deletion vectors for merge, update, delete
-    #[serde(alias = "deletionVectors")]
+    #[serde(rename = "deletionVectors", alias = "DELETION_VECTORS")]
     DELETION_VECTORS,
     /// timestamps without timezone support
-    #[serde(alias = "timestampNtz")]
+    #[serde(rename = "timestampNtz", alias = "TIMESTAMP_WITHOUT_TIMEZONE")]
     TIMESTAMP_WITHOUT_TIMEZONE,
     /// version 2 of checkpointing
-    #[serde(alias = "v2Checkpoint")]
+    #[serde(rename = "v2Checkpoint", alias = "V2_CHECKPOINT")]
     V2_CHECKPOINT,
     /// If we do not match any other reader features
     #[serde(untagged)]
@@ -718,46 +722,48 @@ impl From<String> for ReaderFeatures {
 
 /// Features table writers can support as well as let users know
 /// what is supported
+///
+/// Serialization follows the same naming rules as [`ReaderFeatures`].
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
 pub enum WriterFeatures {
     /// Append Only Tables
-    #[serde(alias = "appendOnly")]
+    #[serde(rename = "appendOnly", alias = "APPEND_ONLY")]
     APPEND_ONLY,
     /// Table invariants
-    #[serde(alias = "invariants")]
+    #[serde(rename = "invariants", alias = "INVARIANTS")]
     INVARIANTS,
     /// Check constraints on columns
-    #[serde(alias = "checkConstraints")]
+    #[serde(rename = "checkConstraints", alias = "CHECK_CONSTRAINTS")]
     CHECK_CONSTRAINTS,
     /// CDF on a table
-    #[serde(alias = "changeDataFeed")]
+    #[serde(rename = "changeDataFeed", alias = "CHANGE_DATA_FEED")]
     CHANGE_DATA_FEED,
     /// Columns with generated values
-    #[serde(alias = "generatedColumns")]
+    #[serde(rename = "generatedColumns", alias = "GENERATED_COLUMNS")]
     GENERATED_COLUMNS,
     /// Mapping of one column to another
-    #[serde(alias = "columnMapping")]
+    #[serde(rename = "columnMapping", alias = "COLUMN_MAPPING")]
     COLUMN_MAPPING,
     /// ID Columns
-    #[serde(alias = "identityColumns")]
+    #[serde(rename = "identityColumns", alias = "IDENTITY_COLUMNS")]
     IDENTITY_COLUMNS,
     /// Deletion vectors for merge, update, delete
-    #[serde(alias = "deletionVectors")]
+    #[serde(rename = "deletionVectors", alias = "DELETION_VECTORS")]
     DELETION_VECTORS,
     /// Row tracking on tables
-    #[serde(alias = "rowTracking")]
+    #[serde(rename = "rowTracking", alias = "ROW_TRACKING")]
     ROW_TRACKING,
     /// timestamps without timezone support
-    #[serde(alias = "timestampNtz")]
+    #[serde(rename = "timestampNtz", alias = "TIMESTAMP_WITHOUT_TIMEZONE")]
     TIMESTAMP_WITHOUT_TIMEZONE,
     /// domain specific metadata
-    #[serde(alias = "domainMetadata")]
+    #[serde(rename = "domainMetadata", alias = "DOMAIN_METADATA")]
     DOMAIN_METADATA,
     /// version 2 of checkpointing
-    #[serde(alias = "v2Checkpoint")]
+    #[serde(rename = "v2Checkpoint", alias = "V2_CHECKPOINT")]
     V2_CHECKPOINT,
     /// Iceberg compatability support
-    #[serde(alias = "icebergCompatV1")]
+    #[serde(rename = "icebergCompatV1", alias = "ICEBERG_COMPAT_V1")]
     ICEBERG_COMPAT_V1,
     /// If we do not match any other reader features
     #[serde(untagged)]
@@ -1217,6 +1223,110 @@ pub(crate) async fn find_latest_check_point_for_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const READER_FEATURE_NAMES: [(ReaderFeatures, &str); 4] = [
+        (ReaderFeatures::COLUMN_MAPPING, "columnMapping"),
+        (ReaderFeatures::DELETION_VECTORS, "deletionVectors"),
+        (ReaderFeatures::TIMESTAMP_WITHOUT_TIMEZONE, "timestampNtz"),
+        (ReaderFeatures::V2_CHECKPOINT, "v2Checkpoint"),
+    ];
+
+    const WRITER_FEATURE_NAMES: [(WriterFeatures, &str); 13] = [
+        (WriterFeatures::APPEND_ONLY, "appendOnly"),
+        (WriterFeatures::INVARIANTS, "invariants"),
+        (WriterFeatures::CHECK_CONSTRAINTS, "checkConstraints"),
+        (WriterFeatures::CHANGE_DATA_FEED, "changeDataFeed"),
+        (WriterFeatures::GENERATED_COLUMNS, "generatedColumns"),
+        (WriterFeatures::COLUMN_MAPPING, "columnMapping"),
+        (WriterFeatures::IDENTITY_COLUMNS, "identityColumns"),
+        (WriterFeatures::DELETION_VECTORS, "deletionVectors"),
+        (WriterFeatures::ROW_TRACKING, "rowTracking"),
+        (WriterFeatures::TIMESTAMP_WITHOUT_TIMEZONE, "timestampNtz"),
+        (WriterFeatures::DOMAIN_METADATA, "domainMetadata"),
+        (WriterFeatures::V2_CHECKPOINT, "v2Checkpoint"),
+        (WriterFeatures::ICEBERG_COMPAT_V1, "icebergCompatV1"),
+    ];
+
+    #[test]
+    fn test_table_features_serialize_to_protocol_names() {
+        for (feature, name) in READER_FEATURE_NAMES {
+            assert_eq!(
+                serde_json::to_value(&feature).unwrap(),
+                serde_json::json!(name)
+            );
+            // The serialized name must be the one the checkpoint reader maps back to the same feature.
+            assert_eq!(ReaderFeatures::from(name.to_string()), feature);
+        }
+        for (feature, name) in WRITER_FEATURE_NAMES {
+            assert_eq!(
+                serde_json::to_value(&feature).unwrap(),
+                serde_json::json!(name)
+            );
+            assert_eq!(WriterFeatures::from(name.to_string()), feature);
+        }
+
+        let protocol = Protocol {
+            min_reader_version: 3,
+            min_writer_version: 7,
+            reader_features: Some(HashSet::from([ReaderFeatures::COLUMN_MAPPING])),
+            writer_features: Some(HashSet::from([WriterFeatures::COLUMN_MAPPING])),
+        };
+        assert_eq!(
+            serde_json::to_value(&protocol).unwrap(),
+            serde_json::json!({
+                "minReaderVersion": 3,
+                "minWriterVersion": 7,
+                "readerFeatures": ["columnMapping"],
+                "writerFeatures": ["columnMapping"]
+            })
+        );
+    }
+
+    #[test]
+    fn test_table_features_deserialize_protocol_legacy_and_unknown_names() {
+        for (feature, name) in READER_FEATURE_NAMES {
+            let legacy_name = serde_json::to_string(&format!("{:?}", feature)).unwrap();
+            assert_eq!(
+                serde_json::from_value::<ReaderFeatures>(serde_json::json!(name)).unwrap(),
+                feature
+            );
+            assert_eq!(
+                serde_json::from_str::<ReaderFeatures>(&legacy_name).unwrap(),
+                feature
+            );
+        }
+        for (feature, name) in WRITER_FEATURE_NAMES {
+            let legacy_name = serde_json::to_string(&format!("{:?}", feature)).unwrap();
+            assert_eq!(
+                serde_json::from_value::<WriterFeatures>(serde_json::json!(name)).unwrap(),
+                feature
+            );
+            assert_eq!(
+                serde_json::from_str::<WriterFeatures>(&legacy_name).unwrap(),
+                feature
+            );
+        }
+
+        let protocol: Protocol = serde_json::from_str(
+            r#"{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["COLUMN_MAPPING","someFutureFeature"],"writerFeatures":["columnMapping"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            protocol.reader_features,
+            Some(HashSet::from([
+                ReaderFeatures::COLUMN_MAPPING,
+                ReaderFeatures::OTHER("someFutureFeature".to_string())
+            ]))
+        );
+        assert_eq!(
+            protocol.writer_features,
+            Some(HashSet::from([WriterFeatures::COLUMN_MAPPING]))
+        );
+        assert_eq!(
+            serde_json::to_value(ReaderFeatures::OTHER("someFutureFeature".to_string())).unwrap(),
+            serde_json::json!("someFutureFeature")
+        );
+    }
 
     #[test]
     fn test_load_table_stats() {
