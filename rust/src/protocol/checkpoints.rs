@@ -1,6 +1,6 @@
 //! Implementation for writing delta checkpoints.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::iter::Iterator;
 use std::ops::Add;
@@ -19,16 +19,13 @@ use parquet::errors::ParquetError;
 use regex::Regex;
 use serde_json::Value;
 
-use super::{
-    time_utils, Action, Add as AddAction, MetaData, Protocol, ProtocolError, ReaderFeatures, Txn,
-    WriterFeatures,
-};
+use super::{time_utils, Action, Add as AddAction, MetaData, Protocol, ProtocolError, Txn};
 use crate::arrow_convert::delta_log_schema_for_table;
 use crate::schema::*;
 use crate::storage::DeltaObjectStore;
 use crate::table::state::DeltaTableState;
-use crate::table::{CheckPoint, CheckPointBuilder, DeltaTableMetaData};
-use crate::{open_table_with_version, DeltaConfigKey, DeltaTable};
+use crate::table::{CheckPoint, CheckPointBuilder};
+use crate::{open_table_with_version, DeltaTable};
 
 type SchemaPath = Vec<String>;
 
@@ -308,41 +305,22 @@ pub async fn cleanup_expired_logs_for(
     }
 }
 
-/// Returns the protocol to write to a checkpoint of `state`, whose metadata is `metadata`.
-///
 /// Table feature lists must be written exactly when the protocol versions support them (reader v3 / writer v7).
-/// Checkpoints written by earlier versions of this branch dropped the lists, so a state loaded from one has a
-/// table features protocol without them. Instead of writing that invalid protocol again, the missing lists are
-/// rebuilt from the metadata: column mapping is the only table feature that the writers using this branch enable,
-/// so the rebuilt lists hold it when the metadata configures a column mapping mode.
-fn checkpoint_protocol(state: &DeltaTableState, metadata: &DeltaTableMetaData) -> Protocol {
-    let uses_column_mapping = metadata
-        .configuration
-        .get(DeltaConfigKey::ColumnMappingMode.as_ref())
-        .and_then(|mode| mode.as_deref())
-        .map_or(false, |mode| {
-            mode.eq_ignore_ascii_case("name") || mode.eq_ignore_ascii_case("id")
-        });
-
-    let reader_features =
-        (state.min_reader_version() >= 3).then(|| match state.reader_features() {
-            Some(features) => features.clone(),
-            None if uses_column_mapping => HashSet::from([ReaderFeatures::COLUMN_MAPPING]),
-            None => HashSet::new(),
-        });
-    let writer_features =
-        (state.min_writer_version() >= 7).then(|| match state.writer_features() {
-            Some(features) => features.clone(),
-            None if uses_column_mapping => HashSet::from([WriterFeatures::COLUMN_MAPPING]),
-            None => HashSet::new(),
-        });
-
-    Protocol {
-        min_reader_version: state.min_reader_version(),
-        min_writer_version: state.min_writer_version(),
-        reader_features,
-        writer_features,
+/// Checkpoints written by earlier delta-rs versions (including earlier versions of this branch) dropped the
+/// lists, so a state loaded from one can have a table features protocol without them. The lost lists can't
+/// be inferred safely (e.g. leaving out `deletionVectors` would let readers return deleted rows), so creating
+/// a checkpoint fails rather than writing another invalid protocol, until a protocol action restores the lists.
+fn ensure_table_feature_lists(state: &DeltaTableState) -> Result<(), ProtocolError> {
+    if (state.min_reader_version() >= 3 && state.reader_features().is_none())
+        || (state.min_writer_version() >= 7 && state.writer_features().is_none())
+    {
+        return Err(ProtocolError::Generic(format!(
+            "Cannot create a checkpoint: the table protocol (reader version {}, writer version {}) is missing its table feature lists",
+            state.min_reader_version(),
+            state.min_writer_version()
+        )));
     }
+    Ok(())
 }
 
 fn parquet_bytes_from_state(
@@ -379,10 +357,21 @@ fn parquet_bytes_from_state(
     }
 
     // protocol
-    let jsons = std::iter::once(Action::protocol(checkpoint_protocol(
-        state,
-        current_metadata,
-    )))
+    ensure_table_feature_lists(state)?;
+    let jsons = std::iter::once(Action::protocol(Protocol {
+        min_reader_version: state.min_reader_version(),
+        min_writer_version: state.min_writer_version(),
+        writer_features: if state.min_writer_version() >= 7 {
+            state.writer_features().cloned()
+        } else {
+            None
+        },
+        reader_features: if state.min_reader_version() >= 3 {
+            state.reader_features().cloned()
+        } else {
+            None
+        },
+    }))
     // metaData
     .chain(std::iter::once(Action::metaData(MetaData::try_from(
         current_metadata.clone(),
@@ -637,18 +626,18 @@ mod tests {
     use super::*;
     use lazy_static::lazy_static;
     use serde_json::json;
+    use std::collections::HashSet;
 
     use crate::operations::DeltaOps;
+    use crate::protocol::{ReaderFeatures, WriterFeatures};
     use crate::table::builder::DeltaTableConfig;
+    use crate::table::DeltaTableMetaData;
     use crate::writer::test_utils::get_delta_schema;
     use object_store::path::Path;
 
-    fn state_with_protocol(
-        protocol: Protocol,
-        configuration: HashMap<String, Option<String>>,
-    ) -> DeltaTableState {
+    fn state_with_protocol(protocol: Protocol) -> DeltaTableState {
         let metadata =
-            DeltaTableMetaData::new(None, None, None, get_delta_schema(), vec![], configuration);
+            DeltaTableMetaData::new(None, None, None, get_delta_schema(), vec![], HashMap::new());
         DeltaTableState::from_actions(
             vec![
                 Action::protocol(protocol),
@@ -680,8 +669,7 @@ mod tests {
             ])),
         };
 
-        let restored =
-            checkpoint_round_trip(&state_with_protocol(protocol.clone(), HashMap::new()));
+        let restored = checkpoint_round_trip(&state_with_protocol(protocol.clone()));
 
         assert_eq!(restored.min_reader_version(), 3);
         assert_eq!(restored.min_writer_version(), 7);
@@ -696,51 +684,31 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_restores_table_features_dropped_by_earlier_checkpoints() {
+    fn test_checkpoint_fails_when_table_feature_lists_are_missing() {
         // the protocol of a state loaded from a checkpoint written without the feature lists
-        let protocol_without_lists = Protocol {
+        let state = state_with_protocol(Protocol {
             min_reader_version: 3,
             min_writer_version: 7,
             reader_features: None,
             writer_features: None,
-        };
-        let column_mapping_configuration = HashMap::from([(
-            DeltaConfigKey::ColumnMappingMode.as_ref().to_string(),
-            Some("name".to_string()),
-        )]);
+        });
 
-        let restored = checkpoint_round_trip(&state_with_protocol(
-            protocol_without_lists.clone(),
-            column_mapping_configuration,
-        ));
-        assert_eq!(restored.min_reader_version(), 3);
-        assert_eq!(restored.min_writer_version(), 7);
-        assert_eq!(
-            restored.reader_features(),
-            Some(&HashSet::from([ReaderFeatures::COLUMN_MAPPING]))
+        let result = parquet_bytes_from_state(&state);
+        assert!(
+            matches!(&result, Err(ProtocolError::Generic(message)) if message.contains("missing its table feature lists")),
+            "{:?}",
+            result.map(|_| ())
         );
-        assert_eq!(
-            restored.writer_features(),
-            Some(&HashSet::from([WriterFeatures::COLUMN_MAPPING]))
-        );
-
-        let restored =
-            checkpoint_round_trip(&state_with_protocol(protocol_without_lists, HashMap::new()));
-        assert_eq!(restored.reader_features(), Some(&HashSet::new()));
-        assert_eq!(restored.writer_features(), Some(&HashSet::new()));
     }
 
     #[test]
     fn test_checkpoint_omits_table_features_below_table_features_protocol() {
-        let restored = checkpoint_round_trip(&state_with_protocol(
-            Protocol {
-                min_reader_version: 1,
-                min_writer_version: 2,
-                reader_features: Some(HashSet::new()),
-                writer_features: Some(HashSet::new()),
-            },
-            HashMap::new(),
-        ));
+        let restored = checkpoint_round_trip(&state_with_protocol(Protocol {
+            min_reader_version: 1,
+            min_writer_version: 2,
+            reader_features: Some(HashSet::new()),
+            writer_features: Some(HashSet::new()),
+        }));
 
         assert_eq!(restored.min_reader_version(), 1);
         assert_eq!(restored.min_writer_version(), 2);
